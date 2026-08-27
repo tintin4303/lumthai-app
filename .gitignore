@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+backend/output/
+backend/test_mp*.py
+backend/output/
+backend/test_mp*.py

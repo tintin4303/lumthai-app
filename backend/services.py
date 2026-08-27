@@ -11,13 +11,15 @@ _midas_transforms = None
 _device = None
 _models_initialized = False
 _model_errors = []
+_depth_estimator = None
 
 HAND_LANDMARKER_MODEL = os.path.join(os.path.dirname(__file__), "hand_landmarker.task")
 
 def init_ai_models():
-    global _hand_landmarker, _models_initialized, _model_errors
+    global _hand_landmarker, _models_initialized, _model_errors, _depth_estimator
     if _models_initialized:
         return
+    
     _models_initialized = True
     _model_errors = []
 
@@ -33,7 +35,15 @@ def init_ai_models():
         _model_errors.append(f"YOLOv8 Pose: {e}")
         print(f"Hand detection fallback: OpenCV skin-tone.")
 
-    print("Depth estimation: using green-screen heuristic.")
+    # Depth Estimation uses HuggingFace AI (DepthAnythingV2)
+    try:
+        from transformers import pipeline
+        import torch
+        _depth_estimator = pipeline("depth-estimation", model="LiheYoung/depth-anything-small-hf")
+        print("Depth estimation: using DepthAnythingV2 (AI Monocular Depth).")
+    except Exception as e:
+        _model_errors.append(f"Depth AI: {e}")
+        print("Depth estimation fallback: green-screen heuristic.")
 
 
 
@@ -272,8 +282,14 @@ def process_interpolation(images, frames_per_transition=10, fps=15):
     output_dir = os.path.join("output", f"transition_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Resize all images to match the first frame
+    # Standardize video resolution to max 720p for performance and consistency
+    max_h = 720
     height, width = images[0].shape[:2]
+    if height > max_h:
+        scale = max_h / height
+        width = int(width * scale)
+        height = max_h
+
     video_filename = os.path.join(output_dir, "transition.mp4")
 
     # Try H.264 (avc1) first — browser-compatible. Fall back to mp4v.
@@ -287,26 +303,56 @@ def process_interpolation(images, frames_per_transition=10, fps=15):
     total_transitions = len(images) - 1
     all_frames = []
 
+    # Pre-process all images to target size
+    processed_images = []
+    for img in images:
+        if img.shape[:2] != (height, width):
+            img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+        processed_images.append(img)
+
+    # Generate coordinate grid for remapping
+    map_x, map_y = np.meshgrid(np.arange(width), np.arange(height))
+    map_x = map_x.astype(np.float32)
+    map_y = map_y.astype(np.float32)
+
+    print("Generating Optical Flow morphing transitions...")
     for idx in range(total_transitions):
-        img1 = images[idx].astype(np.float32)
-        img2 = images[idx + 1]
-        if img2.shape[:2] != (height, width):
-            img2 = cv2.resize(img2, (width, height))
-        img2 = img2.astype(np.float32)
+        img1 = processed_images[idx]
+        img2 = processed_images[idx + 1]
+
+        # Calculate Dense Optical Flow (Farneback)
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        
+        # flow_forward maps where pixels in img1 go in img2
+        flow_forward = cv2.calcOpticalFlowFarneback(gray1, gray2, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+        # flow_backward maps where pixels in img2 go in img1
+        flow_backward = cv2.calcOpticalFlowFarneback(gray2, gray1, None, 0.5, 3, 15, 3, 5, 1.2, 0)
 
         steps = frames_per_transition if idx == total_transitions - 1 else frames_per_transition - 1
         for i in range(steps):
             alpha = i / float(max(frames_per_transition - 1, 1))
-            frame = np.clip((1 - alpha) * img1 + alpha * img2, 0, 255).astype(np.uint8)
+            
+            # Warp img1 forward based on flow and alpha
+            map_x1 = map_x + flow_forward[..., 0] * alpha
+            map_y1 = map_y + flow_forward[..., 1] * alpha
+            warped1 = cv2.remap(img1, map_x1, map_y1, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            
+            # Warp img2 backward based on flow and (1 - alpha)
+            map_x2 = map_x + flow_backward[..., 0] * (1 - alpha)
+            map_y2 = map_y + flow_backward[..., 1] * (1 - alpha)
+            warped2 = cv2.remap(img2, map_x2, map_y2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            
+            # Morph: Cross-fade the warped frames
+            frame = cv2.addWeighted(warped1, 1 - alpha, warped2, alpha, 0)
+            
             video_writer.write(frame)
             all_frames.append(frame)
 
     video_writer.release()
 
-    # Also save each frame as PNG so the frontend can display them as a slideshow fallback
-    frames_b64 = []
-    for frame in all_frames:
-        frames_b64.append(img_to_base64(frame))
+    # Base64 encode for frontend preview
+    frames_b64 = [img_to_base64(frame) for frame in all_frames]
 
     return {
         "video_id": f"transition_{timestamp}",
@@ -339,41 +385,24 @@ def process_unified_pipeline(images, frames_per_transition=10, shift_amount=0.8,
         label = "Hand (Skin/Highest Point)" if hand_detected else "Fallback Region"
         label_image(preview, label)
 
-        # Generate rotating views for hand
+        # Prepare raw textures for True 3D WebGL Viewer
         x1, y1, x2, y2 = crop_box
         crop_img = img[y1:y2, x1:x2]
         crop_depth = depth_map[y1:y2, x1:x2]
         
-        hand_views = []
         if crop_img.size > 0:
-            target_h = 300
-            scale = target_h / crop_img.shape[0]
-            target_w = int(crop_img.shape[1] * scale)
-            c_img = cv2.resize(crop_img, (target_w, target_h), interpolation=cv2.INTER_AREA)
-            c_depth = cv2.resize(crop_depth, (target_w, target_h), interpolation=cv2.INTER_AREA)
-            
-            # sweep from -shift_step/10 to +shift_step/10
-            max_shift = shift_step / 10.0
-            for s in np.linspace(-max_shift, max_shift, 15):
-                v = render_depth_view(c_img, c_depth, shift_amount=s)
-                hand_views.append(img_to_base64(v))
+            hand_depth_b64 = img_to_base64(crop_depth)
         else:
-            hand_views = [img_to_base64(img)]
-
-        # Generate rotating views for body
-        body_views = []
-        for s in np.linspace(-shift_amount, shift_amount, 15):
-            v = render_depth_view(img, depth_map, shift_amount=s)
-            body_views.append(img_to_base64(v))
+            hand_depth_b64 = img_to_base64(depth_map)
 
         frame_results.append({
             "id": idx,
             "hand_detected": hand_detected,
             "crop_box": [int(x) for x in crop_box],
-            "preview": img_to_base64(preview),
-            "depth_map": img_to_base64(depth_display),
-            "hand_views": hand_views,
-            "body_views": body_views,
+            "preview": img_to_base64(preview), # Hand RGB
+            "hand_depth": hand_depth_b64,      # Hand Depth
+            "full_image": img_to_base64(img),  # Body RGB
+            "depth_map": img_to_base64(depth_display), # Body Depth
         })
 
     # Step 5: Interpolation across sequence

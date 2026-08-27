@@ -17,6 +17,14 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
+import { Canvas, useLoader } from '@react-three/fiber';
+import { OrbitControls } from '@react-three/drei';
+import * as THREE from 'three';
+import { Suspense } from 'react';
+import WebcamTracker from '../components/WebcamTracker';
+import PostureCoach from '../components/PostureCoach';
+import StaticHolisticView from '../components/StaticHolisticView';
+
 type ImageFile = {
   id: string;
   file: File;
@@ -28,36 +36,47 @@ type FrameResult = {
   hand_detected: boolean;
   crop_box: number[];
   preview: string;
+  hand_depth: string;
+  full_image: string;
   depth_map: string;
-  hand_views: string[];
-  body_views: string[];
 };
 
-function InteractiveViewer({ frames, title }: { frames: string[], title: string }) {
-  const [index, setIndex] = useState(Math.floor(frames.length / 2));
-  
-  const handleMouseMove = (e: React.MouseEvent<HTMLImageElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    setIndex(Math.floor(x * (frames.length - 1)));
-  };
+function Scene({ imageBase64, depthBase64, isHand }: { imageBase64: string, depthBase64: string, isHand: boolean }) {
+  const texture = useLoader(THREE.TextureLoader, `data:image/jpeg;base64,${imageBase64}`);
+  const depthTexture = useLoader(THREE.TextureLoader, `data:image/jpeg;base64,${depthBase64}`);
+
+  // Scale depth effect based on whether it's a full body or hand crop
+  const depthScale = isHand ? 0.3 : 0.15;
+  const aspect = texture.image.width / texture.image.height;
 
   return (
-    <div className="bg-black/5 rounded-lg p-3 border border-black/10 flex flex-col items-center">
+    <mesh>
+      <planeGeometry args={[5 * aspect, 5, 256, 256]} />
+      <meshStandardMaterial 
+        map={texture} 
+        displacementMap={depthTexture}
+        displacementScale={depthScale}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
+  );
+}
+
+function True3DViewer({ imageBase64, depthBase64, title, isHand = false }: { imageBase64: string, depthBase64: string, title: string, isHand?: boolean }) {
+  return (
+    <div className="bg-black/5 rounded-lg p-3 border border-black/10 flex flex-col items-center h-[300px]">
       <h4 className="text-xs font-semibold uppercase tracking-wider text-black/60 mb-2 w-full text-left">{title}</h4>
-      <p className="text-[10px] text-gray-500 mb-2 w-full text-left">Drag slider or hover image to rotate</p>
-      <img 
-        src={`data:image/jpeg;base64,${frames[index]}`} 
-        alt="Rotated view" 
-        className="w-full h-auto rounded cursor-ew-resize border border-gray-200 shadow-sm"
-        onMouseMove={handleMouseMove}
-      />
-      <input 
-        type="range" min={0} max={frames.length - 1} 
-        value={index} 
-        onChange={e => setIndex(parseInt(e.target.value))} 
-        className="w-full mt-4 accent-black cursor-pointer" 
-      />
+      <p className="text-[10px] text-gray-500 mb-2 w-full text-left">Click and drag to orbit in 3D</p>
+      <div className="w-full h-full bg-black/10 rounded overflow-hidden cursor-move">
+        <Canvas camera={{ position: [0, 0, 4] }}>
+          <ambientLight intensity={1.5} />
+          <directionalLight position={[5, 5, 5]} intensity={1} />
+          <Suspense fallback={null}>
+            <Scene imageBase64={imageBase64} depthBase64={depthBase64} isHand={isHand} />
+          </Suspense>
+          <OrbitControls enableZoom={true} maxPolarAngle={Math.PI / 1.5} minPolarAngle={Math.PI / 3} />
+        </Canvas>
+      </div>
     </div>
   );
 }
@@ -152,7 +171,7 @@ function PipelineModule() {
   // Options
   const [framesPerTransition, setFramesPerTransition] = useState(10);
   const [shiftAmount, setShiftAmount] = useState(0.8);
-  const [gridSize, setGridSize] = useState(5);
+  const [gridSize, setGridSize] = useState(15);
   const [shiftStep, setShiftStep] = useState(6);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
@@ -245,11 +264,11 @@ function PipelineModule() {
             <input type="number" step="0.1" value={shiftAmount} onChange={e => setShiftAmount(Number(e.target.value))} className="w-full border border-gray-300 rounded-md p-2" />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1">Lightfield Grid Size</label>
-            <input type="number" min="3" max="9" step="2" value={gridSize} onChange={e => setGridSize(Number(e.target.value))} className="w-full border border-gray-300 rounded-md p-2" />
+            <label className="block text-sm font-medium mb-1">Rotation Frames</label>
+            <input type="number" min="3" max="45" step="2" value={gridSize} onChange={e => setGridSize(Number(e.target.value))} className="w-full border border-gray-300 rounded-md p-2" />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1">Lightfield Shift Step</label>
+            <label className="block text-sm font-medium mb-1">Hand Rotation Intensity</label>
             <input type="number" min="1" max="20" value={shiftStep} onChange={e => setShiftStep(Number(e.target.value))} className="w-full border border-gray-300 rounded-md p-2" />
           </div>
         </div>
@@ -278,8 +297,31 @@ function PipelineModule() {
           <h2 className="text-2xl font-semibold mb-8">Pipeline Results</h2>
           
           <div className="mb-16">
-            <h3 className="text-lg font-medium mb-4">Interpolated Sequence</h3>
-            <FramePlayer frames={results.interp_frames} videoId={results.video_id} />
+            <h3 className="text-xl font-semibold mb-4">Interpolated Sequence</h3>
+            
+            {/* Video Player */}
+            <div className="mb-8">
+              <FramePlayer frames={results.interp_frames} videoId={results.video_id} />
+            </div>
+
+            {/* Transition Steps Filmstrip */}
+            <div>
+              <h4 className="text-md font-medium text-gray-700 mb-4">Transition Steps (Filmstrip)</h4>
+              <div className="flex overflow-x-auto gap-4 pb-4 snap-x border-b border-gray-200">
+                {results.interp_frames.map((frameB64: string, idx: number) => (
+                  <div key={idx} className="flex-none w-32 md:w-48 snap-center">
+                    <div className="bg-white p-2 rounded-lg border border-gray-200 shadow-sm">
+                      <img 
+                        src={`data:image/jpeg;base64,${frameB64}`} 
+                        alt={`Transition Step ${idx + 1}`} 
+                        className="w-full h-auto rounded"
+                      />
+                      <p className="text-xs text-center text-gray-500 mt-2 font-medium">Step {idx + 1}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
           <div>
@@ -289,20 +331,22 @@ function PipelineModule() {
                 <div key={i} className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
                   <h4 className="font-semibold text-lg mb-4">Frame {i + 1}</h4>
                   
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
                     <div className="bg-black/5 rounded-lg p-2 border border-black/10">
                       <h4 className="text-xs font-semibold uppercase tracking-wider text-black/60 mb-2">Hand Detection</h4>
-                      <img src={`data:image/png;base64,${frame.preview}`} alt="Preview" className="w-full rounded" />
+                      <img src={`data:image/png;base64,${frame.preview}`} alt="Preview" className="w-full h-auto rounded" />
                     </div>
                     
-                    <InteractiveViewer frames={frame.hand_views} title="Rotated Hand View" />
+                    <True3DViewer imageBase64={frame.preview} depthBase64={frame.hand_depth} title="True 3D Hand View" isHand={true} />
 
                     <div className="bg-black/5 rounded-lg p-2 border border-black/10">
                       <h4 className="text-xs font-semibold uppercase tracking-wider text-black/60 mb-2">Depth Map</h4>
-                      <img src={`data:image/jpeg;base64,${frame.depth_map}`} alt="Depth Map" className="w-full rounded" />
+                      <img src={`data:image/jpeg;base64,${frame.depth_map}`} alt="Depth Map" className="w-full h-auto rounded" />
                     </div>
 
-                    <InteractiveViewer frames={frame.body_views} title="Rotated Body View" />
+                    <True3DViewer imageBase64={frame.full_image} depthBase64={frame.depth_map} title="True 3D Body View" isHand={false} />
+                    
+                    <StaticHolisticView imageBase64={frame.full_image} />
                   </div>
                 </div>
               ))}
@@ -315,11 +359,38 @@ function PipelineModule() {
 }
 
 export default function Home() {
+  const [activeTab, setActiveTab] = useState<'pipeline' | 'practice' | 'comparison'>('pipeline');
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 font-sans">
       <main className="max-w-6xl mx-auto px-4 py-8">
+        
+        {/* Header Tabs */}
+        <div className="flex flex-wrap justify-center gap-4 mb-8">
+          <button 
+            onClick={() => setActiveTab('pipeline')}
+            className={`px-6 py-2 rounded-full font-semibold transition-colors ${activeTab === 'pipeline' ? 'bg-black text-white' : 'bg-gray-200 text-black hover:bg-gray-300'}`}
+          >
+            3D Dance Pipeline
+          </button>
+          <button 
+            onClick={() => setActiveTab('practice')}
+            className={`px-6 py-2 rounded-full font-semibold transition-colors ${activeTab === 'practice' ? 'bg-black text-white' : 'bg-gray-200 text-black hover:bg-gray-300'}`}
+          >
+            Live Practice Mirror
+          </button>
+          <button 
+            onClick={() => setActiveTab('comparison')}
+            className={`px-6 py-2 rounded-full font-semibold transition-colors ${activeTab === 'comparison' ? 'bg-black text-white' : 'bg-gray-200 text-black hover:bg-gray-300'}`}
+          >
+            Posture Comparison
+          </button>
+        </div>
+
         <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm">
-          <PipelineModule />
+          {activeTab === 'pipeline' && <PipelineModule />}
+          {activeTab === 'practice' && <WebcamTracker />}
+          {activeTab === 'comparison' && <PostureCoach />}
         </div>
       </main>
     </div>

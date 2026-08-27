@@ -6,6 +6,10 @@ import cv2
 import numpy as np
 from typing import List
 import services
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = FastAPI()
 
@@ -46,9 +50,51 @@ async def unified_pipeline(
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
+@app.post("/api/analyze-pose")
+async def analyze_pose(
+    user_image: UploadFile = File(...),
+    master_image: UploadFile = File(...)
+):
+    import os
+    from groq import Groq
+    import base64
+    
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        return JSONResponse(status_code=400, content={"error": "GROQ_API_KEY environment variable is not set."})
+        
+    try:
+        user_bytes = await user_image.read()
+        master_bytes = await master_image.read()
+        
+        user_b64 = base64.b64encode(user_bytes).decode('utf-8')
+        master_b64 = base64.b64encode(master_bytes).decode('utf-8')
+        
+        client = Groq(api_key=api_key)
+        
+        prompt = "You are an expert in Thai classical dance. Compare the practice pose (first image) to the reference pose (second image). What is the practitioner doing wrong anatomically? Be brief and actionable (e.g. 'Raise your right elbow')."
+        
+        completion = client.chat.completions.create(
+            model="qwen/qwen3.8-27b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{user_b64}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{master_b64}"}}
+                    ]
+                }
+            ],
+            max_tokens=300,
+        )
+        
+        return {"feedback": completion.choices[0].message.content}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @app.get("/api/video/{video_id}")
 async def get_video(video_id: str):
-    # video_id is e.g. transition_20260820_130843
     safe_id = video_id.replace("..", "").replace("/", "")
     path = os.path.join("output", safe_id, "transition.mp4")
     if not os.path.exists(path):
