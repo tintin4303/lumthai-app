@@ -11,7 +11,8 @@ from dotenv import load_dotenv
 # Load custom YOLO model globally so it's ready in memory (we will try/except in case it's still training)
 try:
     from ultralytics import YOLO
-    custom_model_path = "/Users/nyunt/Desktop/Computer Vision/project/runs/classify/lumthai_classifier/weights/best.pt"
+    # Look for the model in the backend folder by default
+    custom_model_path = os.path.join(os.path.dirname(__file__), "lumthai_classifier.pt")
     if os.path.exists(custom_model_path):
         custom_classifier = YOLO(custom_model_path)
     else:
