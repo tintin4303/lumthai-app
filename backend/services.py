@@ -6,9 +6,7 @@ from datetime import datetime
 
 # Global AI model handles
 _hand_landmarker = None
-_midas = None
-_midas_transforms = None
-_device = None
+_yolo_pose = None
 _models_initialized = False
 _model_errors = []
 _depth_estimator = None
@@ -16,35 +14,52 @@ _depth_estimator = None
 HAND_LANDMARKER_MODEL = os.path.join(os.path.dirname(__file__), "hand_landmarker.task")
 
 def init_ai_models():
-    global _hand_landmarker, _models_initialized, _model_errors, _depth_estimator
+    global _hand_landmarker, _yolo_pose, _models_initialized, _model_errors, _depth_estimator
     if _models_initialized:
         return
-    
+
     _models_initialized = True
     _model_errors = []
 
-    # Hand detection uses YOLOv8 Pose
+    # --- Hand detection: MediaPipe Tasks HandLandmarker (21 keypoints per hand) ---
+    try:
+        import mediapipe as mp
+        BaseOptions = mp.tasks.BaseOptions
+        HandLandmarker = mp.tasks.vision.HandLandmarker
+        HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+        VisionRunningMode = mp.tasks.vision.RunningMode
+
+        options = HandLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=HAND_LANDMARKER_MODEL),
+            running_mode=VisionRunningMode.IMAGE,
+            num_hands=2,
+            min_hand_detection_confidence=0.3,
+            min_hand_presence_confidence=0.3,
+            min_tracking_confidence=0.3,
+        )
+        _hand_landmarker = HandLandmarker.create_from_options(options)
+        print("Hand detection: using MediaPipe Tasks HandLandmarker (21 keypoints).")
+    except Exception as e:
+        _model_errors.append(f"MediaPipe HandLandmarker: {e}")
+        print(f"Hand detection (MediaPipe) failed: {e}")
+
+    # --- Fallback body pose: YOLOv8 for wrist localization ---
     try:
         from ultralytics import YOLO
-        import torch
-        _hand_landmarker = YOLO("yolov8n-pose.pt")
-        # Ensure model is downloaded and loaded
-        _hand_landmarker.info(verbose=False)
-        print("Hand detection: using YOLOv8 pose.")
+        _yolo_pose = YOLO("yolov8n-pose.pt")
+        _yolo_pose.info(verbose=False)
+        print("Body pose fallback: YOLOv8 pose loaded.")
     except Exception as e:
         _model_errors.append(f"YOLOv8 Pose: {e}")
-        print(f"Hand detection fallback: OpenCV skin-tone.")
 
-    # Depth Estimation uses HuggingFace AI (DepthAnythingV2)
+    # --- Depth: DepthAnythingV2 via HuggingFace transformers ---
     try:
         from transformers import pipeline
-        import torch
         _depth_estimator = pipeline("depth-estimation", model="LiheYoung/depth-anything-small-hf")
-        print("Depth estimation: using DepthAnythingV2 (AI Monocular Depth).")
+        print("Depth estimation: using DepthAnythingV2.")
     except Exception as e:
         _model_errors.append(f"Depth AI: {e}")
-        print("Depth estimation fallback: green-screen heuristic.")
-
+        print(f"Depth estimation fallback will be used: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -58,220 +73,147 @@ def label_image(img, label):
     return out
 
 def img_to_base64(img):
-    _, buffer = cv2.imencode(".png", img)
+    _, buffer = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return base64.b64encode(buffer).decode("utf-8")
 
-
-# ---------------------------------------------------------------------------
-# 1. Hand Detection (MediaPipe Tasks API)
-# ---------------------------------------------------------------------------
-
-def detect_hand(img):
-    """Detect hand using YOLOv8 pose model (keypoints 9 and 10)."""
-    h, w = img.shape[:2]
-    fallback = (w // 2, 0, w, h // 2)
-
-    try:
-        if hasattr(_hand_landmarker, 'predict'):
-            results = _hand_landmarker(img, verbose=False)
-            if len(results) > 0 and results[0].keypoints is not None:
-                kpts = results[0].keypoints.xy[0].cpu().numpy()
-                conf = results[0].keypoints.conf[0].cpu().numpy()
-                
-                # Check wrists (9, 10), elbows (7, 8), shoulders (5, 6)
-                candidates = []
-                for idx in [9, 10, 7, 8, 5, 6]:
-                    if conf[idx] > 0.4:
-                        candidates.append(kpts[idx])
-                
-                if candidates:
-                    # Pick the highest point (minimum y) - usually the active raised hand in Thai dance
-                    best_pt = min(candidates, key=lambda p: p[1])
-                    cx, cy = int(best_pt[0]), int(best_pt[1])
-                    
-                    # 250x250 crop around the joint
-                    box_size = 250
-                    x1 = max(0, cx - box_size // 2)
-                    y1 = max(0, cy - box_size // 2)
-                    x2 = min(w, x1 + box_size)
-                    y2 = min(h, y1 + box_size)
-                    return (x1, y1, x2, y2)
-                    
-        # Fallback to OpenCV heuristic if YOLO fails or isn't loaded
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
-        mask_hsv = cv2.inRange(hsv, np.array([0, 20, 70]), np.array([20, 255, 255]))
-        mask_ycrcb = cv2.inRange(ycrcb, np.array([0, 133, 77]), np.array([255, 173, 127]))
-        skin_mask = cv2.bitwise_and(mask_hsv, mask_ycrcb)
-
-        cv2.rectangle(skin_mask, (0, int(h * 0.75)), (w, h), 0, -1)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        face_cascade = cv2.CascadeClassifier(cascade_path)
-        
-        if not face_cascade.empty():
-            faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-            for (fx, fy, fw, fh) in faces:
-                cv2.rectangle(skin_mask, (max(0, fx-30), max(0, fy-30)), (min(w, fx+fw+30), min(h, fy+fh+60)), 0, -1)
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
-        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel)
-        contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        valid_contours = [c for c in contours if cv2.contourArea(c) > 300]
-        if not valid_contours: return fallback
-
-        best_contour = None
-        max_dist = -1
-        for c in valid_contours:
-            M = cv2.moments(c)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                dist = abs(cx - w / 2)
-                if dist > max_dist:
-                    max_dist = dist
-                    best_contour = c
-
-        if best_contour is None: return fallback
-        M = cv2.moments(best_contour)
-        cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-        box_size = 250
-        return (max(0, cx - box_size // 2), max(0, cy - box_size // 2), min(w, max(0, cx - box_size // 2) + box_size), min(h, max(0, cy - box_size // 2) + box_size))
-
-    except Exception as e:
-        print(f"Hand detection error: {e}")
-        return fallback
+def pad_box(x1, y1, x2, y2, pad, w, h):
+    """Expand a bounding box by `pad` pixels, clamped to image bounds."""
+    return (
+        max(0, x1 - pad),
+        max(0, y1 - pad),
+        min(w, x2 + pad),
+        min(h, y2 + pad),
+    )
 
 
 # ---------------------------------------------------------------------------
-# 2. Light Field (Chapter 14 style, from original script)
-# ---------------------------------------------------------------------------
-
-def create_light_field(img, depth_map, crop_box, grid_size=5, shift_step=6):
-    """Generates a synthetic left/center/right multi-view montage with true 3D parallax."""
-    x1, y1, x2, y2 = crop_box
-    crop_img = img[y1:y2, x1:x2]
-    crop_depth = depth_map[y1:y2, x1:x2]
-
-    if crop_img.size == 0 or crop_depth.size == 0:
-        return img
-
-    # Resize to fixed height for montage
-    target_h = 300
-    scale = target_h / crop_img.shape[0]
-    target_w = int(crop_img.shape[1] * scale)
-    crop_img = cv2.resize(crop_img, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    crop_depth = cv2.resize(crop_depth, (target_w, target_h), interpolation=cv2.INTER_AREA)
-
-    baseline = 2.0
-    # shift_step in UI is 1-20. Let's scale it to shift_amount (e.g. 0.0 to 1.5)
-    amount = shift_step / 10.0
-
-    left_view = render_depth_view(crop_img, crop_depth, shift_amount=-amount, baseline=baseline)
-    center_view = render_depth_view(crop_img, crop_depth, shift_amount=0.0, baseline=baseline)
-    right_view = render_depth_view(crop_img, crop_depth, shift_amount=amount, baseline=baseline)
-
-    left_view = label_image(left_view, "Left View")
-    center_view = label_image(center_view, "Center")
-    right_view = label_image(right_view, "Right View")
-
-    return np.hstack([left_view, center_view, right_view])
-
-
-# ---------------------------------------------------------------------------
-# 3. Depth Estimation (MiDaS)
+# 1. Depth Estimation — DepthAnythingV2 or heuristic fallback
 # ---------------------------------------------------------------------------
 
 def estimate_depth(img):
-    """Return a grayscale depth map the same size as img."""
-def estimate_green_screen_foreground(img):
-    """Estimate dancer mask from the green background in the Thai pose images."""
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # Green-screen range. This intentionally catches the bright green background.
-    lower_green = np.array([35, 35, 35], dtype=np.uint8)
-    upper_green = np.array([90, 255, 255], dtype=np.uint8)
-    green_mask = cv2.inRange(hsv, lower_green, upper_green)
+    h, w = img.shape[:2]
 
-    foreground = cv2.bitwise_not(green_mask)
-    kernel = np.ones((7, 7), np.uint8)
-    foreground = cv2.morphologyEx(foreground, cv2.MORPH_OPEN, kernel, iterations=1)
-    foreground = cv2.morphologyEx(foreground, cv2.MORPH_CLOSE, kernel, iterations=3)
+    if _depth_estimator is not None:
+        try:
+            from PIL import Image as PILImage
+            pil_img = PILImage.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            result = _depth_estimator(pil_img)
+            depth_pil = result["depth"]  # PIL Image, mode "I" (32-bit int) or "L"
 
-    contours, _ = cv2.findContours(foreground, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    clean = np.zeros(foreground.shape, dtype=np.uint8)
-    if contours:
-        large = [c for c in contours if cv2.contourArea(c) > 800]
-        cv2.drawContours(clean, large, -1, 255, -1)
+            depth_np = np.array(depth_pil, dtype=np.float32)
 
-    return cv2.GaussianBlur(clean, (21, 21), 0)
+            # Normalise to 0-255
+            dmin, dmax = depth_np.min(), depth_np.max()
+            if dmax > dmin:
+                depth_np = (depth_np - dmin) / (dmax - dmin) * 255.0
+            else:
+                depth_np = np.zeros_like(depth_np)
+
+            depth_np = depth_np.astype(np.uint8)
+
+            # Resize to match input image
+            if depth_np.shape[:2] != (h, w):
+                depth_np = cv2.resize(depth_np, (w, h), interpolation=cv2.INTER_LINEAR)
+
+            return depth_np
+        except Exception as e:
+            print(f"DepthAnything inference error: {e}. Falling back to heuristic.")
+
+    # ---- Heuristic fallback (works only on studio/plain backgrounds) ----
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (21, 21), 0)
+    return blurred
 
 
-def estimate_depth(img, side_bias=0.0):
+# ---------------------------------------------------------------------------
+# 2. Hand Detection — MediaPipe Tasks (21 keypoints) → tight bounding box
+# ---------------------------------------------------------------------------
+
+def detect_hand(img):
     """
-    Create an approximate depth map replacing the neural network model.
-    Darker pixels (lower values) are treated as closer in the rendering math.
+    Returns (x1, y1, x2, y2) tight crop around the most prominent hand.
+    Falls back to wrist from YOLOv8 pose if MediaPipe fails.
     """
     h, w = img.shape[:2]
-    foreground = estimate_green_screen_foreground(img).astype(np.float32) / 255.0
+    fallback = (w // 4, 0, 3 * w // 4, h // 2)
 
-    x = np.linspace(0, 1, w, dtype=np.float32)[None, :]
-    y = np.linspace(0, 1, h, dtype=np.float32)[:, None]
+    # --- Try MediaPipe Tasks HandLandmarker ---
+    if _hand_landmarker is not None:
+        try:
+            import mediapipe as mp
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            result = _hand_landmarker.detect(mp_image)
 
-    # Background stays far (235). Dancer foreground is closer.
-    depth = np.full((h, w), 235, dtype=np.float32)
-    depth -= foreground * 145
+            if result.hand_landmarks:
+                # Pick the hand with highest average landmark visibility
+                best_landmarks = result.hand_landmarks[0]
 
-    # Lower body and center body are treated as slightly closer for stronger parallax.
-    center_x = np.exp(-5.0 * (x - 0.5) ** 2)
-    lower_body = np.exp(-5.0 * (y - 0.68) ** 2)
-    depth -= foreground * center_x * lower_body * 35
+                xs = [lm.x * w for lm in best_landmarks]
+                ys = [lm.y * h for lm in best_landmarks]
 
-    # Optional side bias
-    depth += foreground * side_bias * (x - 0.5) * 45
+                x1, y1 = int(min(xs)), int(min(ys))
+                x2, y2 = int(max(xs)), int(max(ys))
 
-    return np.clip(depth, 60, 255).astype(np.uint8)
+                return pad_box(x1, y1, x2, y2, 40, w, h)
+        except Exception as e:
+            print(f"MediaPipe HandLandmarker error: {e}")
+
+    # --- Fallback: YOLOv8 pose wrist keypoints ---
+    if _yolo_pose is not None:
+        try:
+            results = _yolo_pose(img, verbose=False)
+            if results and results[0].keypoints is not None:
+                kpts = results[0].keypoints.xy[0].cpu().numpy()
+                conf = results[0].keypoints.conf[0].cpu().numpy()
+
+                candidates = []
+                for idx in [9, 10, 7, 8]:  # wrists then elbows
+                    if conf[idx] > 0.3:
+                        candidates.append(kpts[idx])
+
+                if candidates:
+                    best_pt = min(candidates, key=lambda p: p[1])  # highest point
+                    cx, cy = int(best_pt[0]), int(best_pt[1])
+                    box_size = 220
+                    return pad_box(cx - box_size // 2, cy - box_size // 2,
+                                   cx + box_size // 2, cy + box_size // 2, 0, w, h)
+        except Exception as e:
+            print(f"YOLOv8 pose fallback error: {e}")
+
+    return fallback
 
 
 # ---------------------------------------------------------------------------
-# 4. Depth-Based Rendering (from user's script)
+# 3. Body Crop — tight bounding box around the full dancer using YOLOv8
 # ---------------------------------------------------------------------------
 
-def render_depth_view(color_img, depth_img, shift_amount=0.8, baseline=2.0):
+def detect_body(img):
     """
-    Renders a new viewpoint from a color image and its depth map.
-    Follows the Chapter 14 teacher sample 3D warping approximation.
+    Returns (x1, y1, x2, y2) bounding box around the detected person.
+    Falls back to full image if no person detected.
     """
-    h, w = color_img.shape[:2]
+    h, w = img.shape[:2]
 
-    if depth_img.max() > 1:
-        depth_norm = depth_img.astype(np.float32) / 255.0
-    else:
-        depth_norm = depth_img.astype(np.float32)
+    if _yolo_pose is not None:
+        try:
+            results = _yolo_pose(img, verbose=False)
+            if results and results[0].boxes is not None and len(results[0].boxes) > 0:
+                # Take the largest bounding box (most prominent person)
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                areas = [(b[2]-b[0]) * (b[3]-b[1]) for b in boxes]
+                best_box = boxes[np.argmax(areas)]
+                x1, y1, x2, y2 = [int(v) for v in best_box]
+                return pad_box(x1, y1, x2, y2, 20, w, h)
+        except Exception as e:
+            print(f"Body detection error: {e}")
 
-    y, x = np.mgrid[0:h, 0:w]
-    x = x - w / 2
-    y = y - h / 2
-
-    focal_length = 500
-    depth_epsilon = 0.1
-    disparity = baseline * focal_length / (depth_norm * 100 + depth_epsilon)
-
-    map_x = (x + disparity * shift_amount + w / 2).astype(np.float32)
-    map_y = (y + h / 2).astype(np.float32)
-
-    new_view = cv2.remap(
-        color_img,
-        map_x,
-        map_y,
-        cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REFLECT101,
-    )
-    return new_view
+    return (0, 0, w, h)
 
 
 # ---------------------------------------------------------------------------
-# 5. Interpolation (from original interpolation.py)
+# 4. Interpolation (Optical Flow morphing)
 # ---------------------------------------------------------------------------
 
 def process_interpolation(images, frames_per_transition=10, fps=15):
@@ -282,7 +224,6 @@ def process_interpolation(images, frames_per_transition=10, fps=15):
     output_dir = os.path.join("output", f"transition_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Standardize video resolution to max 720p for performance and consistency
     max_h = 720
     height, width = images[0].shape[:2]
     if height > max_h:
@@ -292,7 +233,6 @@ def process_interpolation(images, frames_per_transition=10, fps=15):
 
     video_filename = os.path.join(output_dir, "transition.mp4")
 
-    # Try H.264 (avc1) first — browser-compatible. Fall back to mp4v.
     for fourcc_str in ["avc1", "H264", "mp4v"]:
         fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
         video_writer = cv2.VideoWriter(video_filename, fourcc, fps, (width, height))
@@ -303,14 +243,12 @@ def process_interpolation(images, frames_per_transition=10, fps=15):
     total_transitions = len(images) - 1
     all_frames = []
 
-    # Pre-process all images to target size
     processed_images = []
     for img in images:
         if img.shape[:2] != (height, width):
             img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
         processed_images.append(img)
 
-    # Generate coordinate grid for remapping
     map_x, map_y = np.meshgrid(np.arange(width), np.arange(height))
     map_x = map_x.astype(np.float32)
     map_y = map_y.astype(np.float32)
@@ -320,38 +258,31 @@ def process_interpolation(images, frames_per_transition=10, fps=15):
         img1 = processed_images[idx]
         img2 = processed_images[idx + 1]
 
-        # Calculate Dense Optical Flow (Farneback)
         gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-        
-        # flow_forward maps where pixels in img1 go in img2
+
         flow_forward = cv2.calcOpticalFlowFarneback(gray1, gray2, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-        # flow_backward maps where pixels in img2 go in img1
         flow_backward = cv2.calcOpticalFlowFarneback(gray2, gray1, None, 0.5, 3, 15, 3, 5, 1.2, 0)
 
         steps = frames_per_transition if idx == total_transitions - 1 else frames_per_transition - 1
         for i in range(steps):
             alpha = i / float(max(frames_per_transition - 1, 1))
-            
-            # Warp img1 forward based on flow and alpha
+
             map_x1 = map_x + flow_forward[..., 0] * alpha
             map_y1 = map_y + flow_forward[..., 1] * alpha
             warped1 = cv2.remap(img1, map_x1, map_y1, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-            
-            # Warp img2 backward based on flow and (1 - alpha)
+
             map_x2 = map_x + flow_backward[..., 0] * (1 - alpha)
             map_y2 = map_y + flow_backward[..., 1] * (1 - alpha)
             warped2 = cv2.remap(img2, map_x2, map_y2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-            
-            # Morph: Cross-fade the warped frames
+
             frame = cv2.addWeighted(warped1, 1 - alpha, warped2, alpha, 0)
-            
+
             video_writer.write(frame)
             all_frames.append(frame)
 
     video_writer.release()
 
-    # Base64 encode for frontend preview
     frames_b64 = [img_to_base64(frame) for frame in all_frames]
 
     return {
@@ -361,7 +292,7 @@ def process_interpolation(images, frames_per_transition=10, fps=15):
 
 
 # ---------------------------------------------------------------------------
-# Master Pipeline
+# 5. Master Pipeline
 # ---------------------------------------------------------------------------
 
 def process_unified_pipeline(images, frames_per_transition=10, shift_amount=0.8, grid_size=5, shift_step=6):
@@ -369,43 +300,53 @@ def process_unified_pipeline(images, frames_per_transition=10, shift_amount=0.8,
 
     frame_results = []
     for idx, img in enumerate(images):
-        # Step 1: Depth estimation (do this first so we can use it for 3D light field)
+        h, w = img.shape[:2]
+
+        # Step 1: AI Depth estimation (works on any background)
         depth_map = estimate_depth(img)
-        # Convert grayscale depth to 3-channel for display
         depth_display = cv2.applyColorMap(depth_map, cv2.COLORMAP_INFERNO)
 
-        # Step 2: Detect hand region (face-excluded skin detection)
-        crop_box = detect_hand(img)
-        hand_detected = _hand_landmarker is not None
+        # Step 2: Detect hand region (tight 21-keypoint box)
+        hand_box = detect_hand(img)
+        hx1, hy1, hx2, hy2 = hand_box
+        hand_crop = img[hy1:hy2, hx1:hx2]
+        hand_depth_crop = depth_map[hy1:hy2, hx1:hx2]
 
-        # Annotate source image with detected box
+        # Step 3: Detect full body bounding box (for body 3D view)
+        body_box = detect_body(img)
+        bx1, by1, bx2, by2 = body_box
+        body_crop = img[by1:by2, bx1:bx2]
+        body_depth_crop = depth_map[by1:by2, bx1:bx2]
+
+        # Step 4: Annotate preview with both boxes
         preview = img.copy()
-        color = (0, 200, 0) if hand_detected else (0, 100, 255)
-        cv2.rectangle(preview, (crop_box[0], crop_box[1]), (crop_box[2], crop_box[3]), color, 4)
-        label = "Hand (Skin/Highest Point)" if hand_detected else "Fallback Region"
-        label_image(preview, label)
+        cv2.rectangle(preview, (hx1, hy1), (hx2, hy2), (0, 255, 0), 3)
+        cv2.putText(preview, "Hand", (hx1, max(hy1-8, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.rectangle(preview, (bx1, by1), (bx2, by2), (255, 140, 0), 2)
+        cv2.putText(preview, "Body", (bx1, max(by1-8, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 140, 0), 2)
 
-        # Prepare raw textures for True 3D WebGL Viewer
-        x1, y1, x2, y2 = crop_box
-        crop_img = img[y1:y2, x1:x2]
-        crop_depth = depth_map[y1:y2, x1:x2]
-        
-        if crop_img.size > 0:
-            hand_depth_b64 = img_to_base64(crop_depth)
-        else:
-            hand_depth_b64 = img_to_base64(depth_map)
+        # Safety: fall back to full image if crop is empty
+        if hand_crop.size == 0:
+            hand_crop = img
+            hand_depth_crop = depth_map
+        if body_crop.size == 0:
+            body_crop = img
+            body_depth_crop = depth_map
 
         frame_results.append({
             "id": idx,
-            "hand_detected": hand_detected,
-            "crop_box": [int(x) for x in crop_box],
-            "preview": img_to_base64(preview), # Hand RGB
-            "hand_depth": hand_depth_b64,      # Hand Depth
-            "full_image": img_to_base64(img),  # Body RGB
-            "depth_map": img_to_base64(depth_display), # Body Depth
+            "hand_detected": _hand_landmarker is not None,
+            "crop_box": [int(x) for x in hand_box],
+            "preview": img_to_base64(preview),
+            "hand_crop": img_to_base64(hand_crop),
+            "hand_depth": img_to_base64(hand_depth_crop),
+            "body_crop": img_to_base64(body_crop),
+            "body_depth": img_to_base64(body_depth_crop),
+            "full_image": img_to_base64(img),
+            "depth_map": img_to_base64(depth_display),
         })
 
-    # Step 5: Interpolation across sequence
+    # Step 5: Interpolation
     interp = process_interpolation(images, frames_per_transition)
 
     return {

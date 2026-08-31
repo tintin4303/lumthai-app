@@ -8,6 +8,17 @@ from typing import List
 import services
 from dotenv import load_dotenv
 
+# Load custom YOLO model globally so it's ready in memory (we will try/except in case it's still training)
+try:
+    from ultralytics import YOLO
+    custom_model_path = "/Users/nyunt/Desktop/Computer Vision/project/runs/classify/lumthai_classifier/weights/best.pt"
+    if os.path.exists(custom_model_path):
+        custom_classifier = YOLO(custom_model_path)
+    else:
+        custom_classifier = None
+except ImportError:
+    custom_classifier = None
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -49,6 +60,35 @@ async def unified_pipeline(
         return JSONResponse(content=results)
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+
+@app.post("/api/classify")
+async def classify_dance(image: UploadFile = File(...)):
+    """Classify the uploaded image as Fon Leap or Fon Mean using our custom trained model."""
+    global custom_classifier
+    if custom_classifier is None:
+        # Try to reload it in case training just finished
+        if os.path.exists(custom_model_path):
+            custom_classifier = YOLO(custom_model_path)
+        else:
+            return JSONResponse(status_code=503, content={"error": "Custom model is still training or not found."})
+            
+    # Read image
+    contents = await image.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    # Run inference
+    results = custom_classifier(img)
+    
+    # Parse results
+    top_class_idx = results[0].probs.top1
+    confidence = float(results[0].probs.top1conf.cpu().numpy())
+    class_name = results[0].names[top_class_idx]
+    
+    return {
+        "class": class_name,
+        "confidence": confidence
+    }
 
 @app.post("/api/analyze-pose")
 async def analyze_pose(

@@ -1,5 +1,6 @@
 "use client";
 import React, { useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 
 export default function PostureCoach() {
   const [masterFile, setMasterFile] = useState<File | null>(null);
@@ -104,12 +105,25 @@ export default function PostureCoach() {
         {error && <p className="text-red-500 font-semibold mb-4">{error}</p>}
         
         {feedback && (
-          <div className="w-full bg-green-50 border border-green-200 rounded-xl p-6 text-left">
-            <h3 className="text-green-800 font-bold mb-2 flex items-center gap-2">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-              Feedback
+          <div className="w-full bg-white border border-gray-200 shadow-sm rounded-xl p-6 md:p-8 text-left mt-4">
+            <h3 className="text-black text-xl font-bold mb-6 border-b border-gray-100 pb-4">
+              Posture Analysis
             </h3>
-            <p className="text-gray-800 whitespace-pre-wrap">{feedback}</p>
+            <div className="text-gray-800 leading-relaxed text-base space-y-4">
+              <ReactMarkdown
+                components={{
+                  p: ({node, ...props}) => <p className="mb-4" {...props} />,
+                  strong: ({node, ...props}) => <strong className="font-bold text-black" {...props} />,
+                  ul: ({node, ...props}) => <ul className="list-disc pl-6 mb-4 space-y-2" {...props} />,
+                  li: ({node, ...props}) => <li className="" {...props} />,
+                  h1: ({node, ...props}) => <h1 className="text-xl font-bold text-black mt-6 mb-3" {...props} />,
+                  h2: ({node, ...props}) => <h2 className="text-lg font-bold text-black mt-5 mb-2" {...props} />,
+                  h3: ({node, ...props}) => <h3 className="text-md font-bold text-black mt-4 mb-2" {...props} />,
+                }}
+              >
+                {feedback}
+              </ReactMarkdown>
+            </div>
           </div>
         )}
       </div>

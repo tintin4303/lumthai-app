@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import {
   DndContext,
   closestCenter,
@@ -24,6 +24,7 @@ import { Suspense } from 'react';
 import WebcamTracker from '../components/WebcamTracker';
 import PostureCoach from '../components/PostureCoach';
 import StaticHolisticView from '../components/StaticHolisticView';
+import StyleClassifier from '../components/StyleClassifier';
 
 type ImageFile = {
   id: string;
@@ -36,45 +37,93 @@ type FrameResult = {
   hand_detected: boolean;
   crop_box: number[];
   preview: string;
+  hand_crop: string;
   hand_depth: string;
+  body_crop: string;
+  body_depth: string;
   full_image: string;
   depth_map: string;
 };
 
-function Scene({ imageBase64, depthBase64, isHand }: { imageBase64: string, depthBase64: string, isHand: boolean }) {
-  const texture = useLoader(THREE.TextureLoader, `data:image/jpeg;base64,${imageBase64}`);
-  const depthTexture = useLoader(THREE.TextureLoader, `data:image/jpeg;base64,${depthBase64}`);
+// Point-cloud renderer: each pixel → a 3D point displaced by its depth value.
+// Background pixels (depth > threshold) are discarded so only the subject is shown.
+function PointCloudScene({ imageBase64, depthBase64 }: { imageBase64: string, depthBase64: string }) {
+  const meshRef = useRef<THREE.Points>(null);
 
-  // Scale depth effect based on whether it's a full body or hand crop
-  const depthScale = isHand ? 0.3 : 0.15;
-  const aspect = texture.image.width / texture.image.height;
+  const texture = useLoader(THREE.TextureLoader, `data:image/jpeg;base64,${imageBase64}`);
+  const depthTex = useLoader(THREE.TextureLoader, `data:image/jpeg;base64,${depthBase64}`);
+
+  // Build point cloud geometry from textures via offscreen canvas
+  const geometry = useMemo(() => {
+    const img = texture.image as HTMLImageElement;
+    const dep = depthTex.image as HTMLImageElement;
+    if (!img?.width || !dep?.width) return new THREE.BufferGeometry();
+
+    const SAMPLE = 3; // sample every Nth pixel for performance
+    const cw = img.naturalWidth || img.width;
+    const ch = img.naturalHeight || img.height;
+
+    const colorCanvas = document.createElement('canvas');
+    colorCanvas.width = cw; colorCanvas.height = ch;
+    const colorCtx = colorCanvas.getContext('2d')!;
+    colorCtx.drawImage(img, 0, 0, cw, ch);
+    const colorData = colorCtx.getImageData(0, 0, cw, ch).data;
+
+    const depCanvas = document.createElement('canvas');
+    depCanvas.width = cw; depCanvas.height = ch;
+    const depCtx = depCanvas.getContext('2d')!;
+    depCtx.drawImage(dep, 0, 0, cw, ch);
+    const depData = depCtx.getImageData(0, 0, cw, ch).data;
+
+    const posArr: number[] = [];
+    const colArr: number[] = [];
+
+    const aspect = cw / ch;
+    const W = 4 * aspect;
+    const H = 4;
+    const DEPTH_THRESHOLD = 210; // discard far background
+    const DEPTH_SCALE = 1.5;
+
+    for (let py = 0; py < ch; py += SAMPLE) {
+      for (let px = 0; px < cw; px += SAMPLE) {
+        const i = (py * cw + px) * 4;
+        const depthVal = depData[i]; // R channel
+
+        if (depthVal > DEPTH_THRESHOLD) continue; // skip background
+
+        const x = (px / cw - 0.5) * W;
+        const y = -(py / ch - 0.5) * H;
+        const z = (1 - depthVal / 255) * DEPTH_SCALE;
+
+        posArr.push(x, y, z);
+        colArr.push(colorData[i] / 255, colorData[i+1] / 255, colorData[i+2] / 255);
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colArr, 3));
+    return geo;
+  }, [texture, depthTex]);
 
   return (
-    <mesh>
-      <planeGeometry args={[5 * aspect, 5, 256, 256]} />
-      <meshStandardMaterial 
-        map={texture} 
-        displacementMap={depthTexture}
-        displacementScale={depthScale}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
+    <points ref={meshRef} geometry={geometry}>
+      <pointsMaterial size={0.018} vertexColors sizeAttenuation />
+    </points>
   );
 }
 
-function True3DViewer({ imageBase64, depthBase64, title, isHand = false }: { imageBase64: string, depthBase64: string, title: string, isHand?: boolean }) {
+function True3DViewer({ imageBase64, depthBase64, title }: { imageBase64: string, depthBase64: string, title: string, isHand?: boolean }) {
   return (
     <div className="bg-black/5 rounded-lg p-3 border border-black/10 flex flex-col items-center h-[300px]">
       <h4 className="text-xs font-semibold uppercase tracking-wider text-black/60 mb-2 w-full text-left">{title}</h4>
-      <p className="text-[10px] text-gray-500 mb-2 w-full text-left">Click and drag to orbit in 3D</p>
-      <div className="w-full h-full bg-black/10 rounded overflow-hidden cursor-move">
-        <Canvas camera={{ position: [0, 0, 4] }}>
-          <ambientLight intensity={1.5} />
-          <directionalLight position={[5, 5, 5]} intensity={1} />
+      <p className="text-[10px] text-gray-500 mb-2 w-full text-left">Drag to orbit · Scroll to zoom</p>
+      <div className="w-full h-full bg-black rounded overflow-hidden cursor-move">
+        <Canvas camera={{ position: [0, 0, 3.5], fov: 50 }}>
           <Suspense fallback={null}>
-            <Scene imageBase64={imageBase64} depthBase64={depthBase64} isHand={isHand} />
+            <PointCloudScene imageBase64={imageBase64} depthBase64={depthBase64} />
           </Suspense>
-          <OrbitControls enableZoom={true} maxPolarAngle={Math.PI / 1.5} minPolarAngle={Math.PI / 3} />
+          <OrbitControls enableZoom={true} />
         </Canvas>
       </div>
     </div>
@@ -332,20 +381,25 @@ function PipelineModule() {
                   <h4 className="font-semibold text-lg mb-4">Frame {i + 1}</h4>
                   
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
+                    {/* Detection preview with both bounding boxes */}
                     <div className="bg-black/5 rounded-lg p-2 border border-black/10">
-                      <h4 className="text-xs font-semibold uppercase tracking-wider text-black/60 mb-2">Hand Detection</h4>
-                      <img src={`data:image/png;base64,${frame.preview}`} alt="Preview" className="w-full h-auto rounded" />
+                      <h4 className="text-xs font-semibold uppercase tracking-wider text-black/60 mb-2">Detection</h4>
+                      <img src={`data:image/jpeg;base64,${frame.preview}`} alt="Preview" className="w-full h-auto rounded" />
                     </div>
-                    
-                    <True3DViewer imageBase64={frame.preview} depthBase64={frame.hand_depth} title="True 3D Hand View" isHand={true} />
 
+                    {/* Hand crop + depth → point-cloud */}
+                    <True3DViewer imageBase64={frame.hand_crop} depthBase64={frame.hand_depth} title="3D Hand (Cropped)" />
+
+                    {/* Depth map (full body, colorized) */}
                     <div className="bg-black/5 rounded-lg p-2 border border-black/10">
                       <h4 className="text-xs font-semibold uppercase tracking-wider text-black/60 mb-2">Depth Map</h4>
                       <img src={`data:image/jpeg;base64,${frame.depth_map}`} alt="Depth Map" className="w-full h-auto rounded" />
                     </div>
 
-                    <True3DViewer imageBase64={frame.full_image} depthBase64={frame.depth_map} title="True 3D Body View" isHand={false} />
-                    
+                    {/* Body crop + depth → point-cloud */}
+                    <True3DViewer imageBase64={frame.body_crop} depthBase64={frame.body_depth} title="3D Body (Cropped)" />
+
+                    {/* Holistic skeleton overlay */}
                     <StaticHolisticView imageBase64={frame.full_image} />
                   </div>
                 </div>
