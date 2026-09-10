@@ -25,6 +25,7 @@ import WebcamTracker from '../components/WebcamTracker';
 import PostureCoach from '../components/PostureCoach';
 import StaticHolisticView from '../components/StaticHolisticView';
 import StyleClassifier from '../components/StyleClassifier';
+import FonLebCoach from '../components/FonLebCoach';
 
 type ImageFile = {
   id: string;
@@ -413,7 +414,7 @@ function PipelineModule() {
 }
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'pipeline' | 'practice' | 'comparison'>('pipeline');
+  const [activeTab, setActiveTab] = useState<'pipeline' | 'practice' | 'comparison' | 'fonLebCoach'>('pipeline');
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 font-sans">
@@ -439,12 +440,19 @@ export default function Home() {
           >
             Posture Comparison
           </button>
+          <button
+            onClick={() => setActiveTab('fonLebCoach')}
+            className={`px-6 py-2 rounded-full font-semibold transition-colors ${activeTab === 'fonLebCoach' ? 'bg-black text-white' : 'bg-gray-200 text-black hover:bg-gray-300'}`}
+          >
+            Fon Leb Pose Coach
+          </button>
         </div>
 
         <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm">
           {activeTab === 'pipeline' && <PipelineModule />}
           {activeTab === 'practice' && <WebcamTracker />}
           {activeTab === 'comparison' && <PostureCoach />}
+          {activeTab === 'fonLebCoach' && <FonLebCoach />}
         </div>
       </main>
     </div>
