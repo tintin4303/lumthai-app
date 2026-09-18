@@ -1,3 +1,6 @@
+import os
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
+os.environ['HF_HUB_OFFLINE'] = '1'
 import cv2
 import numpy as np
 import base64
@@ -6,15 +9,18 @@ from datetime import datetime
 
 # Global AI model handles
 _hand_landmarker = None
+_pose_landmarker = None
 _yolo_pose = None
 _models_initialized = False
 _model_errors = []
 _depth_estimator = None
+_rembg_session = None
 
 HAND_LANDMARKER_MODEL = os.path.join(os.path.dirname(__file__), "hand_landmarker.task")
+POSE_LANDMARKER_MODEL = os.path.join(os.path.dirname(__file__), "pose_landmarker.task")
 
 def init_ai_models():
-    global _hand_landmarker, _yolo_pose, _models_initialized, _model_errors, _depth_estimator
+    global _hand_landmarker, _pose_landmarker, _yolo_pose, _models_initialized, _model_errors, _depth_estimator, _rembg_session
     if _models_initialized:
         return
 
@@ -43,6 +49,25 @@ def init_ai_models():
         _model_errors.append(f"MediaPipe HandLandmarker: {e}")
         print(f"Hand detection (MediaPipe) failed: {e}")
 
+    # --- Pose detection: MediaPipe Tasks PoseLandmarker (33 keypoints 3D) ---
+    try:
+        import mediapipe as mp
+        BaseOptions = mp.tasks.BaseOptions
+        PoseLandmarker = mp.tasks.vision.PoseLandmarker
+        PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
+        VisionRunningMode = mp.tasks.vision.RunningMode
+
+        options = PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=POSE_LANDMARKER_MODEL),
+            running_mode=VisionRunningMode.IMAGE,
+            output_segmentation_masks=False,
+        )
+        _pose_landmarker = PoseLandmarker.create_from_options(options)
+        print("Pose detection: using MediaPipe Tasks PoseLandmarker (33 keypoints).")
+    except Exception as e:
+        _model_errors.append(f"MediaPipe PoseLandmarker: {e}")
+        print(f"Pose detection (MediaPipe) failed: {e}")
+
     # --- Fallback body pose: YOLOv8 for wrist localization ---
     try:
         from ultralytics import YOLO
@@ -51,6 +76,15 @@ def init_ai_models():
         print("Body pose fallback: YOLOv8 pose loaded.")
     except Exception as e:
         _model_errors.append(f"YOLOv8 Pose: {e}")
+
+    # --- Background Removal: rembg (U2Net) ---
+    try:
+        import rembg
+        _rembg_session = rembg.new_session('u2net')
+        print("Background removal: using rembg U2Net.")
+    except Exception as e:
+        _model_errors.append(f"rembg: {e}")
+        print(f"Background removal failed: {e}")
 
     # --- Depth: DepthAnythingV2 via HuggingFace transformers ---
     try:
@@ -130,13 +164,13 @@ def estimate_depth(img):
 # 2. Hand Detection — MediaPipe Tasks (21 keypoints) → tight bounding box
 # ---------------------------------------------------------------------------
 
-def detect_hand(img):
+def detect_hands(img):
     """
-    Returns (x1, y1, x2, y2) tight crop around the most prominent hand.
+    Returns a list of (x1, y1, x2, y2) tight crops for each detected hand (up to 2).
     Falls back to wrist from YOLOv8 pose if MediaPipe fails.
     """
     h, w = img.shape[:2]
-    fallback = (w // 4, 0, 3 * w // 4, h // 2)
+    fallback = [(w // 4, 0, 3 * w // 4, h // 2)]
 
     # --- Try MediaPipe Tasks HandLandmarker ---
     if _hand_landmarker is not None:
@@ -147,16 +181,14 @@ def detect_hand(img):
             result = _hand_landmarker.detect(mp_image)
 
             if result.hand_landmarks:
-                # Pick the hand with highest average landmark visibility
-                best_landmarks = result.hand_landmarks[0]
-
-                xs = [lm.x * w for lm in best_landmarks]
-                ys = [lm.y * h for lm in best_landmarks]
-
-                x1, y1 = int(min(xs)), int(min(ys))
-                x2, y2 = int(max(xs)), int(max(ys))
-
-                return pad_box(x1, y1, x2, y2, 40, w, h)
+                boxes = []
+                for landmarks in result.hand_landmarks:
+                    xs = [lm.x * w for lm in landmarks]
+                    ys = [lm.y * h for lm in landmarks]
+                    x1, y1 = int(min(xs)), int(min(ys))
+                    x2, y2 = int(max(xs)), int(max(ys))
+                    boxes.append(pad_box(x1, y1, x2, y2, 40, w, h))
+                return boxes
         except Exception as e:
             print(f"MediaPipe HandLandmarker error: {e}")
 
@@ -174,11 +206,14 @@ def detect_hand(img):
                         candidates.append(kpts[idx])
 
                 if candidates:
-                    best_pt = min(candidates, key=lambda p: p[1])  # highest point
-                    cx, cy = int(best_pt[0]), int(best_pt[1])
-                    box_size = 220
-                    return pad_box(cx - box_size // 2, cy - box_size // 2,
-                                   cx + box_size // 2, cy + box_size // 2, 0, w, h)
+                    boxes = []
+                    # Create a box for up to 2 candidates
+                    for pt in sorted(candidates, key=lambda p: p[1])[:2]:
+                        cx, cy = int(pt[0]), int(pt[1])
+                        box_size = 220
+                        boxes.append(pad_box(cx - box_size // 2, cy - box_size // 2,
+                                       cx + box_size // 2, cy + box_size // 2, 0, w, h))
+                    return boxes
         except Exception as e:
             print(f"YOLOv8 pose fallback error: {e}")
 
@@ -283,7 +318,15 @@ def process_interpolation(images, frames_per_transition=10, fps=15):
 
     video_writer.release()
 
-    frames_b64 = [img_to_base64(frame) for frame in all_frames]
+    # Cap preview frames sent over JSON to prevent multi-megabyte payloads that crash browsers
+    max_preview_frames = 30
+    if len(all_frames) > max_preview_frames:
+        step = len(all_frames) / float(max_preview_frames)
+        preview_frames = [all_frames[int(i * step)] for i in range(max_preview_frames)]
+    else:
+        preview_frames = all_frames
+
+    frames_b64 = [img_to_base64(frame) for frame in preview_frames]
 
     return {
         "video_id": f"transition_{timestamp}",
@@ -355,3 +398,179 @@ def process_unified_pipeline(images, frames_per_transition=10, shift_amount=0.8,
         "interp_frames": interp["frames_b64"],
         "model_errors": _model_errors,
     }
+
+
+def extract_pose_landmarks_3d(img):
+    """
+    Returns a list of 33 dictionaries with x, y, z world coordinates and visibility.
+    """
+    if _pose_landmarker is None:
+        return None
+        
+    try:
+        import mediapipe as mp
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+        
+        result = _pose_landmarker.detect(mp_image)
+        if not result.pose_world_landmarks or len(result.pose_world_landmarks) == 0:
+            return None
+            
+        landmarks = result.pose_world_landmarks[0]
+        
+        points = []
+        for lm in landmarks:
+            points.append({
+                "x": lm.x,
+                "y": lm.y,
+                "z": lm.z,
+                "visibility": lm.visibility
+            })
+            
+        return points
+    except Exception as e:
+        print(f"Pose extraction error: {e}")
+        return None
+
+
+def extract_hand_landmarks_3d(img):
+    """
+    Returns a list of detected hands, where each hand is a list of 21 dictionaries
+    with x, y, z world coordinates.
+    """
+    if _hand_landmarker is None:
+        return []
+        
+    try:
+        import mediapipe as mp
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+        
+        result = _hand_landmarker.detect(mp_image)
+        if not result.hand_world_landmarks or len(result.hand_world_landmarks) == 0:
+            return []
+            
+        all_hands = []
+        for idx, hand_lms in enumerate(result.hand_world_landmarks):
+            handedness = result.handedness[idx][0].category_name if result.handedness else "Unknown"
+
+            points = []
+            for lm in hand_lms:
+                points.append({
+                    "x": lm.x,
+                    "y": lm.y,
+                    "z": lm.z
+                })
+            all_hands.append({
+                "handedness": handedness,
+                "points": points
+            })
+            
+        return all_hands
+    except Exception as e:
+        print(f"Hand extraction error: {e}")
+        return []
+
+
+def isolate_and_depth(img, box):
+    """
+    Takes a BGR image and a bounding box.
+    Crops it, removes background (rembg), and estimates depth on the foreground.
+    Returns (rgba_b64, depth_b64).
+    """
+    x1, y1, x2, y2 = box
+    crop = img[y1:y2, x1:x2]
+    global _depth_estimator, _rembg_session
+    if crop.size == 0:
+        return "", ""
+        
+    try:
+        import rembg
+        from PIL import Image
+        import io
+        import base64
+        
+        # 1. Remove background
+        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(crop_rgb)
+        if _rembg_session is None:
+            _rembg_session = rembg.new_session('u2net')
+        pil_rgba = rembg.remove(pil_img, session=_rembg_session)
+        
+        # Convert back to numpy to extract alpha mask
+        rgba_np = np.array(pil_rgba)
+        alpha_mask = rgba_np[:, :, 3] > 0
+        
+        # 2. Estimate depth using existing model
+        if _depth_estimator is None:
+            init_ai_models()
+            
+        if _depth_estimator:
+            # Depth model expects RGB PIL image
+            rgb_only = Image.fromarray(rgba_np[:, :, :3])
+            depth_result = _depth_estimator(rgb_only)
+            depth_map = depth_result["depth"]
+            depth_np = np.array(depth_map)
+            
+            # Mask depth map: set background to pure black (furthest away)
+            depth_np[~alpha_mask] = 0
+            
+            # Normalize foreground depth
+            fg_depth = depth_np[alpha_mask]
+            if len(fg_depth) > 0:
+                min_val = fg_depth.min()
+                max_val = fg_depth.max()
+                if max_val > min_val:
+                    # Scale to 50-255 so it pushes out
+                    depth_np[alpha_mask] = ((depth_np[alpha_mask] - min_val) / (max_val - min_val) * 205 + 50).astype(np.uint8)
+            
+            # Convert depth to base64
+            _, depth_buf = cv2.imencode('.png', depth_np)
+            depth_b64 = base64.b64encode(depth_buf).decode('utf-8')
+        else:
+            depth_b64 = ""
+            
+        # Convert RGBA to base64
+        _, rgba_buf = cv2.imencode('.png', cv2.cvtColor(rgba_np, cv2.COLOR_RGBA2BGRA))
+        rgba_b64 = base64.b64encode(rgba_buf).decode('utf-8')
+        
+        return rgba_b64, depth_b64
+    except Exception as e:
+        print(f"Rembg background removal failed ({e}), falling back to Depth-based isolation.")
+        try:
+            import base64
+            if _depth_estimator is None:
+                init_ai_models()
+                
+            crop_depth = estimate_depth(crop)
+            
+            # Use Otsu thresholding on the depth map to isolate the foreground subject
+            _, mask = cv2.threshold(crop_depth, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            
+            # Create RGBA image with transparent background
+            bgra = cv2.cvtColor(crop, cv2.COLOR_BGR2BGRA)
+            bgra[:, :, 3] = mask
+            
+            # Mask depth: background is black (0)
+            depth_masked = crop_depth.copy()
+            depth_masked[mask == 0] = 0
+            
+            fg_depth = depth_masked[mask > 0]
+            if len(fg_depth) > 0:
+                min_val = fg_depth.min()
+                max_val = fg_depth.max()
+                if max_val > min_val:
+                    depth_masked[mask > 0] = ((depth_masked[mask > 0] - min_val) / (max_val - min_val) * 205 + 50).astype(np.uint8)
+                    
+            _, rgba_buf = cv2.imencode('.png', bgra)
+            rgba_b64 = base64.b64encode(rgba_buf).decode('utf-8')
+            
+            _, depth_buf = cv2.imencode('.png', depth_masked)
+            depth_b64 = base64.b64encode(depth_buf).decode('utf-8')
+            
+            return rgba_b64, depth_b64
+        except Exception as e2:
+            print(f"Depth fallback failed: {e2}")
+            return "", ""

@@ -2,17 +2,23 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 // Shared script loader
-const loadMediaPipe = async () => {
-  if (!(window as any).Holistic) {
-    const loadScript = (src: string) => new Promise((resolve) => {
-      const s = document.createElement('script');
-      s.src = src;
-      s.crossOrigin = 'anonymous';
-      s.onload = resolve;
-      document.head.appendChild(s);
-    });
+const loadMediaPipe = async (datasetType: string) => {
+  const loadScript = (src: string) => new Promise((resolve) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.crossOrigin = 'anonymous';
+    s.onload = resolve;
+    document.head.appendChild(s);
+  });
+  
+  if (!(window as any).drawConnectors) {
     await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js');
     await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js');
+  }
+  
+  if (datasetType === 'hands_only' && !(window as any).Hands) {
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js');
+  } else if (datasetType !== 'hands_only' && !(window as any).Holistic) {
     await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js');
   }
 };
@@ -34,7 +40,7 @@ const processNextInQueue = () => {
   }
 };
 
-export default function StaticHolisticView({ imageBase64, title = "Holistic Skeletal Map" }: { imageBase64: string, title?: string }) {
+export default function StaticHolisticView({ imageBase64, title = "Holistic Skeletal Map", datasetType = "full_body" }: { imageBase64: string, title?: string, datasetType?: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [loading, setLoading] = useState(true);
 
@@ -43,7 +49,7 @@ export default function StaticHolisticView({ imageBase64, title = "Holistic Skel
     let isMounted = true;
 
     const task = async () => {
-      await loadMediaPipe();
+      await loadMediaPipe(datasetType);
       if (!isMounted || !canvasRef.current) return;
 
       const w = window as any;
@@ -56,6 +62,7 @@ export default function StaticHolisticView({ imageBase64, title = "Holistic Skel
             resolve(true);
             return;
           }
+          
           const canvas = canvasRef.current;
           const ctx = canvas.getContext('2d');
           if (!ctx) {
@@ -66,45 +73,86 @@ export default function StaticHolisticView({ imageBase64, title = "Holistic Skel
           canvas.width = img.width;
           canvas.height = img.height;
 
-          holistic = new w.Holistic({
-            locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
-          });
+          if (datasetType === 'hands_only') {
+            holistic = new w.Hands({
+              locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+            holistic.setOptions({
+              maxNumHands: 2,
+              modelComplexity: 1,
+              minDetectionConfidence: 0.1,
+              minTrackingConfidence: 0.1
+            });
+            holistic.onResults((results: any) => {
+              if (!isMounted) {
+                if (holistic) holistic.close();
+                return;
+              }
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              if (results.multiHandLandmarks) {
+                for (const landmarks of results.multiHandLandmarks) {
+                  w.drawConnectors(ctx, landmarks, w.HAND_CONNECTIONS, {color: '#00CC00', lineWidth: 4});
+                  w.drawLandmarks(ctx, landmarks, {color: '#FF0000', lineWidth: 2});
+                }
+              }
+              setLoading(false);
+              if (holistic) holistic.close();
+              resolve(true);
+            });
+          } else {
+            holistic = new w.Holistic({
+              locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
+            });
+            holistic.setOptions({
+              modelComplexity: 1,
+              smoothLandmarks: false,
+              enableSegmentation: false,
+              refineFaceLandmarks: false,
+              minDetectionConfidence: 0.1,
+              minTrackingConfidence: 0.1
+            });
+            holistic.onResults((results: any) => {
+              if (!isMounted) {
+                if (holistic) holistic.close();
+                return;
+              }
+              
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              
+              // Draw Body
+              if (results.poseLandmarks) {
+                w.drawConnectors(ctx, results.poseLandmarks, w.POSE_CONNECTIONS, {color: '#00FF00', lineWidth: 6});
+                w.drawLandmarks(ctx, results.poseLandmarks, {color: '#FF0000', lineWidth: 3});
+              }
+              // Draw Left Hand
+              if (results.leftHandLandmarks) {
+                w.drawConnectors(ctx, results.leftHandLandmarks, w.HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 4});
+                w.drawLandmarks(ctx, results.leftHandLandmarks, {color: '#00FF00', lineWidth: 2});
+              }
+              // Draw Right Hand
+              if (results.rightHandLandmarks) {
+                w.drawConnectors(ctx, results.rightHandLandmarks, w.HAND_CONNECTIONS, {color: '#00CC00', lineWidth: 4});
+                w.drawLandmarks(ctx, results.rightHandLandmarks, {color: '#FF0000', lineWidth: 2});
+              }
+              
+              setLoading(false);
+              if (holistic) holistic.close();
+              resolve(true);
+            });
+          }
 
-          holistic.setOptions({
-            modelComplexity: 1,
-            smoothLandmarks: false,
-            enableSegmentation: false,
-            refineFaceLandmarks: false,
-            minDetectionConfidence: 0.5,
-          });
-
-          holistic.onResults((results: any) => {
-            if (!isMounted) return;
-            
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            
-            // Draw Body
-            if (results.poseLandmarks) {
-              w.drawConnectors(ctx, results.poseLandmarks, w.POSE_CONNECTIONS, {color: '#00FF00', lineWidth: 6});
-              w.drawLandmarks(ctx, results.poseLandmarks, {color: '#FF0000', lineWidth: 3});
-            }
-            // Draw Left Hand
-            if (results.leftHandLandmarks) {
-              w.drawConnectors(ctx, results.leftHandLandmarks, w.HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 4});
-              w.drawLandmarks(ctx, results.leftHandLandmarks, {color: '#00FF00', lineWidth: 2});
-            }
-            // Draw Right Hand
-            if (results.rightHandLandmarks) {
-              w.drawConnectors(ctx, results.rightHandLandmarks, w.HAND_CONNECTIONS, {color: '#00CC00', lineWidth: 4});
-              w.drawLandmarks(ctx, results.rightHandLandmarks, {color: '#FF0000', lineWidth: 2});
-            }
-            
-            setLoading(false);
-            holistic.close();
+          if (!isMounted) {
+            if (holistic) holistic.close();
             resolve(true);
-          });
+            return;
+          }
 
-          await holistic.send({ image: img });
+          try {
+            await holistic.send({ image: img });
+          } catch (e) {
+            console.error("MediaPipe Wasm Error:", e);
+            resolve(true);
+          }
         };
       });
     };
@@ -114,17 +162,15 @@ export default function StaticHolisticView({ imageBase64, title = "Holistic Skel
 
     return () => {
       isMounted = false;
-      if (holistic) holistic.close();
+      // We do not call holistic.close() here because it could interrupt a running holistic.send() and crash WASM.
+      // Instead, we let the promise finish and close it inside onResults or the checks above.
     };
   }, [imageBase64]);
 
   return (
-    <div className="bg-black/5 rounded-lg p-2 border border-black/10 relative w-full flex flex-col h-full">
-      <h4 className="text-xs font-semibold uppercase tracking-wider text-black/60 mb-2">{title}</h4>
-      <div className="relative w-full flex-grow flex items-center justify-center bg-gray-100 rounded overflow-hidden">
-        {loading && <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold text-gray-500 z-10 animate-pulse bg-white/80">Extracting Skeleton...</div>}
-        <canvas ref={canvasRef} className="w-full h-auto object-contain"></canvas>
-      </div>
+    <div className="relative w-full flex-grow flex items-center justify-center bg-black rounded-lg overflow-hidden h-full">
+      {loading && <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-zinc-500 z-10 animate-pulse bg-[#0f0f11]/80 backdrop-blur-sm">Extracting Skeleton...</div>}
+      <canvas ref={canvasRef} className="w-full h-auto object-contain"></canvas>
     </div>
   );
 }

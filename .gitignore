@@ -43,3 +43,12 @@ backend/output/
 backend/test_mp*.py
 backend/output/
 backend/test_mp*.py
+backend/output/triposr/
+backend/TripoSR/
+
+# Backend Data
+backend/data/
+*.pt
+*.ses
+__pycache__/
+*.pyc

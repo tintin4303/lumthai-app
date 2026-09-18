@@ -191,57 +191,57 @@ export default function WebcamTracker() {
   }, [isActive]);
 
   return (
-    <div className="flex flex-col items-center bg-white rounded-xl p-6 md:p-8 border border-gray-200 shadow-sm w-full">
-      <h2 className="text-2xl font-bold mb-2">Live Practice Mirror</h2>
-      <p className="text-gray-500 mb-8 text-center max-w-xl">
-        Upload a reference pose to extract its skeletal map, then align your live blue ghost skeleton side-by-side!
+    <div className="flex flex-col items-center bg-[#18181b] rounded-2xl p-6 md:p-8 border border-zinc-800 shadow-xl w-full">
+      <h2 className="text-2xl font-bold tracking-tight text-white mb-2">Live Practice Mirror</h2>
+      <p className="text-zinc-400 mb-8 text-center max-w-xl">
+        Select an image to overlay its skeleton. Click "Start Camera" to practice moving into alignment with the reference pose.
       </p>
 
-      {/* Ghost Overlay Controls */}
-      <div className="mb-8 w-full flex flex-col sm:flex-row gap-4 bg-gray-50 p-4 rounded-xl border border-gray-200">
+      {/* Upload Reference Image */}
+      <div className="mb-8 w-full flex flex-col sm:flex-row gap-4 bg-[#0f0f11] p-4 rounded-xl border border-zinc-800 shadow-inner">
         <div className="flex-1">
-          <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-2">1. Upload Reference Pose</label>
-          <input type="file" accept="image/*" onChange={handleOverlayUpload} className="text-sm w-full file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-black file:text-white hover:file:bg-gray-800 cursor-pointer" />
+          <label className="block text-xs font-bold uppercase tracking-wider text-zinc-500 mb-2">1. Upload Reference Pose</label>
+          <input type="file" accept="image/*" onChange={handleOverlayUpload} className="text-sm w-full file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-zinc-800 file:text-zinc-200 hover:file:bg-zinc-700 hover:file:text-white cursor-pointer text-zinc-400" />
         </div>
       </div>
 
-      {isProcessingRef && <p className="text-blue-600 font-bold mb-4 animate-pulse">Extracting Reference Skeleton...</p>}
-      
+      {isProcessingRef && <p className="text-amber-500 font-bold mb-4 animate-pulse">Extracting Reference Skeleton...</p>}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full max-w-6xl mb-8">
-        {/* Left Side: Reference Pose */}
+        {/* Reference Image Canvas */}
         <div className="flex flex-col items-center w-full">
-          <h3 className="font-semibold text-gray-700 mb-4 uppercase tracking-wider text-sm">Reference Pose Map</h3>
-          <div className="w-full aspect-[4/3] bg-gray-100 rounded-xl overflow-hidden border border-gray-200 shadow-inner flex items-center justify-center relative">
-            {!overlayImage && <span className="text-gray-400">No Reference Uploaded</span>}
+          <h3 className="font-semibold text-zinc-300 mb-4 uppercase tracking-wider text-[11px]">Reference Pose Map</h3>
+          <div className="w-full aspect-[4/3] bg-black rounded-xl overflow-hidden border border-zinc-800 shadow-inner flex items-center justify-center relative">
+            {!overlayImage && <span className="text-zinc-600 font-medium">No Reference Uploaded</span>}
             <canvas ref={staticCanvasRef} className="absolute inset-0 w-full h-full object-contain -scale-x-100"></canvas>
           </div>
         </div>
 
-        {/* Right Side: Live Mirror */}
+        {/* Live Camera Canvas */}
         <div className="flex flex-col items-center w-full">
-          <h3 className="font-semibold text-gray-700 mb-4 uppercase tracking-wider text-sm">Live Alignment Mirror</h3>
+          <h3 className="font-semibold text-zinc-300 mb-4 uppercase tracking-wider text-[11px]">Live Alignment Mirror</h3>
           {!isActive ? (
-            <div className="w-full aspect-[4/3] bg-gray-100 rounded-xl flex items-center justify-center border border-gray-200">
+            <div className="w-full aspect-[4/3] bg-[#0f0f11] rounded-xl flex items-center justify-center border border-zinc-800 shadow-inner">
               <button 
-                onClick={() => setIsActive(true)}
-                className="bg-black text-white px-8 py-4 rounded-full font-bold shadow-lg hover:bg-gray-800 transition-colors"
+                onClick={() => setIsActive(true)} 
+                className="bg-zinc-100 text-black px-8 py-3 rounded-xl font-bold shadow-lg hover:bg-white transition-colors hover:scale-105 active:scale-100"
               >
-                Start Webcam Tracker
+                Start Camera
               </button>
             </div>
           ) : (
-            <div className="relative w-full aspect-[4/3] bg-black rounded-xl overflow-hidden shadow-2xl border border-gray-800 flex items-center justify-center">
+            <div className="relative w-full aspect-[4/3] bg-black rounded-xl overflow-hidden shadow-2xl border border-zinc-800 flex items-center justify-center">
               {error && <div className="absolute inset-0 flex items-center justify-center text-red-500 bg-black/80 z-30 p-4 text-center font-semibold">{error}</div>}
-              
+              {/* Invisible video element to feed MediaPipe */}
               <video ref={videoRef} className="hidden" playsInline></video>
-              
+              {/* Flipped Canvas for mirror effect */}
               <canvas ref={liveCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 -scale-x-100"></canvas>
-
+              
               <button 
-                onClick={() => setIsActive(false)}
-                className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-red-600 text-white px-6 py-2 rounded-full font-bold shadow-lg hover:bg-red-700 transition-colors z-30"
+                onClick={() => setIsActive(false)} 
+                className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-red-500/20 text-red-500 border border-red-500/50 px-6 py-2 rounded-full font-bold shadow-lg hover:bg-red-500 hover:text-white transition-colors z-30"
               >
-                Stop Mirror
+                Stop Camera
               </button>
             </div>
           )}

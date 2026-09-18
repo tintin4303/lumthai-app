@@ -1,0 +1,40 @@
+# LumThai PDF Update Notes
+
+Here are the suggested text additions and modifications to update your research paper/PDF to reflect the latest unified 3D Dance Pipeline.
+
+## 1. Abstract
+**Add to the second paragraph:**
+"The system recently unified its 3D rendering pipeline to not only generate 2.5D depth-based point clouds, but to also automatically process the image dataset using Apple Object Capture (PhotogrammetrySession) on the Mac's Neural Engine. This generates a fully textured, photorealistic 3D `.obj` statue of the dancer."
+
+## 2. System Architecture (Section III)
+**Update the Table:**
+Add a new row to the architecture table:
+- **Component:** Photorealistic 3D Avatar
+- **Current function:** Uses Apple Object Capture to compile the input dataset into a textured 3D `.obj` mesh.
+- **Status:** Implemented
+
+## 3. Methodology - Pipeline (Section III)
+**Update the "Pipeline:" list:**
+Change Step 4 to:
+4. 3D / Image-Based Rendering
+   - Use depth-based rendering (DepthAnythingV2) to show the pose as a 2.5D point cloud.
+   - Use optical flow interpolation to show smooth transitions between sequential poses.
+   - **[NEW]** Utilize Apple Object Capture to reconstruct a complete, photorealistic 3D geometric mesh from the input dataset.
+
+## 4. B. 3D Dance Pipeline
+**Update the text to reflect the unified flow:**
+"The 3D Dance Pipeline processes an ordered sequence of dance-pose images through a unified, fully automated workflow. 
+
+First, MediaPipe and YOLOv8 extract body keypoints and hand landmarks. Second, the Depth Anything V2 model estimates dense relative depth maps across all frames, rendered using the Inferno colormap for intuitive visual depth inspection. Third, bidirectional Farnebäck dense optical flow generates a smooth morphed transition video between sequential poses. Finally, the complete dataset is piped to an Apple Object Capture background process utilizing the M-series Neural Engine to construct a fully textured, photorealistic 3D `.obj` statue. 
+
+To optimize browser responsiveness and prevent WebGL context exhaustion, the user interface samples a random subset of 5 keyframes for detailed 2D visual analysis (Detection preview, Holistic Skeleton overlay, and Depth Anything V2 map). Beneath the photorealistic 3D Avatar, interactive 3D point clouds are rendered using Three.js / React Three Fiber, allowing users to orbit and inspect the volumetric 3D form of the isolated dancer (with background transparency) and the intricate 3D hand gesture."
+
+## 5. IV. Development Progress and Results
+**Update the text:**
+"The 3D Dance Pipeline supports ordered image input, hand and body localization, relative Depth Anything V2 maps, holistic skeleton extraction, optical-flow transition generation, and newly integrated **Photogrammetry 3D Mesh Generation**. The frontend has been optimized to handle large datasets (up to 100 images) by displaying a 5-frame analytical sample alongside the complete video, the final photorealistic 3D statue, and interactive 3D volumetric point clouds on a single unified dashboard."
+
+**Update the "Module: 3D Dance Pipeline" Image (Figure 1):**
+Take a fresh screenshot of the web app showing:
+1. The 5-frame sample grid (Detection, Skeleton, and Inferno Depth Anything V2 map).
+2. The Interpolated sequence filmstrip and video.
+3. The "Final 3D Reconstructions" section containing the spinning textured 3D Avatar alongside the 3D Body and Hand Point Clouds.
