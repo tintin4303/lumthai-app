@@ -245,11 +245,11 @@ async def pipeline_mesh(
                 crop = image[y1:y2, x1:x2]
                 if crop.size == 0:
                     return ""
-                _, buf = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                _, buf = cv2.imencode('.png', crop)
                 return base64.b64encode(buf).decode('utf-8')
 
             def encode_img(image):
-                _, buf = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                _, buf = cv2.imencode('.png', image)
                 return base64.b64encode(buf).decode('utf-8')
 
             preview_b64 = encode_img(preview)
@@ -445,3 +445,25 @@ async def get_job_status(job_id: str):
         return {"status": "error", "message": "Job not found."}
         
     return {"status": "processing"}
+
+@app.get("/api/download-model/{job_id}")
+async def download_model_zip(job_id: str):
+    import shutil
+    import tempfile
+    
+    # Sanitize job_id
+    safe_id = job_id.replace("..", "").replace("/", "").replace("\\", "")
+    job_dir = os.path.join(os.path.dirname(__file__), "data/jobs", safe_id)
+    full_dir = os.path.join(job_dir, "output", "full")
+    
+    if not os.path.exists(full_dir):
+        return JSONResponse({"error": "Model not found."}, status_code=404)
+        
+    # Create a temporary zip file
+    temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    temp_zip.close()
+    
+    # Zip the contents of the 'full' directory
+    shutil.make_archive(temp_zip.name.replace('.zip', ''), 'zip', full_dir)
+    
+    return FileResponse(temp_zip.name, media_type="application/zip", filename=f"lumthai_3d_model_{safe_id}.zip")

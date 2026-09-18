@@ -26,6 +26,7 @@ import { CSS } from "@dnd-kit/utilities";
 import * as THREE from 'three';
 import { Suspense } from 'react';
 import WebcamTracker from '../components/WebcamTracker';
+import FonLebCoach from '../components/FonLebCoach';
 import PostureCoach from '../components/PostureCoach';
 import StaticHolisticView from '../components/StaticHolisticView';
 import StyleClassifier from '../components/StyleClassifier';
@@ -136,11 +137,77 @@ function True3DViewer({ imageBase64, depthBase64, title }: { imageBase64: string
       </div>
     );
   }
+
+  const handleDownloadPLY = () => {
+    const img = new window.Image();
+    const imgSrc = imageBase64.startsWith('data:') ? imageBase64 : `data:image/png;base64,${imageBase64}`;
+    img.src = imgSrc;
+    
+    const dep = new window.Image();
+    const depSrc = depthBase64.startsWith('data:') ? depthBase64 : `data:image/png;base64,${depthBase64}`;
+    dep.src = depSrc;
+    
+    Promise.all([
+      new Promise(r => img.onload = r),
+      new Promise(r => dep.onload = r)
+    ]).then(() => {
+      const cw = img.width, ch = img.height;
+      const cCanvas = document.createElement('canvas'); cCanvas.width = cw; cCanvas.height = ch;
+      const cCtx = cCanvas.getContext('2d')!; cCtx.drawImage(img,0,0,cw,ch);
+      const cData = cCtx.getImageData(0,0,cw,ch).data;
+
+      const dCanvas = document.createElement('canvas'); dCanvas.width = cw; dCanvas.height = ch;
+      const dCtx = dCanvas.getContext('2d')!; dCtx.drawImage(dep,0,0,cw,ch);
+      const dData = dCtx.getImageData(0,0,cw,ch).data;
+
+      const points = [];
+      const SAMPLE = 2;
+      const aspect = cw / ch;
+      const W = 4 * aspect, H = 4, DEPTH_SCALE = 1.4;
+
+      for(let py=0; py<ch; py+=SAMPLE) {
+        for(let px=0; px<cw; px+=SAMPLE) {
+          const i = (py*cw+px)*4;
+          if(cData[i+3] < 50) continue;
+          const dVal = dData[i];
+          if(dVal < 10) continue;
+          const x = (px/cw - 0.5)*W, y = -(py/ch - 0.5)*H, z = (dVal/255 - 0.5)*DEPTH_SCALE;
+          points.push(`${x.toFixed(5)} ${y.toFixed(5)} ${z.toFixed(5)} ${cData[i]} ${cData[i+1]} ${cData[i+2]}`);
+        }
+      }
+      
+      const header = `ply
+format ascii 1.0
+element vertex ${points.length}
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+end_header
+`;
+      const blob = new Blob([header + points.join('\\n')], {type: 'text/plain'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'pointcloud.ply'; a.click();
+    });
+  };
+
   return (
-    <div className="bg-[#0f0f11] rounded-xl p-5 border border-zinc-800/80 flex flex-col items-center h-[460px] shadow-inner">
-      <h4 className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 mb-1 w-full text-left">{title}</h4>
+    <div className="bg-[#0f0f11] rounded-xl p-5 border border-zinc-800/80 flex flex-col items-center h-[500px] shadow-inner relative">
+      <div className="flex justify-between items-center w-full mb-1">
+        <h4 className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">{title}</h4>
+        <div className="flex gap-2">
+          <a href={depthBase64.startsWith('data:') ? depthBase64 : `data:image/png;base64,${depthBase64}`} download="depth_map.png" className="text-[10px] bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-2 py-1 rounded transition-colors">
+            ↓ Depth Map (.png)
+          </a>
+          <button onClick={handleDownloadPLY} className="text-[10px] bg-amber-500/20 hover:bg-amber-500/40 border border-amber-500/30 text-amber-500 px-2 py-1 rounded transition-colors">
+            ↓ Point Cloud (.ply)
+          </button>
+        </div>
+      </div>
       <p className="text-[10px] text-zinc-500 mb-3 w-full text-left">Drag to rotate 3D point cloud · Scroll to zoom</p>
-      <div className="w-full h-full bg-black rounded-lg overflow-hidden cursor-move relative shadow-xl border border-zinc-800">
+      <div className="w-full h-[410px] bg-black rounded-lg overflow-hidden cursor-move relative shadow-xl border border-zinc-800">
         <Canvas camera={{ position: [0, 0, 3.5], fov: 50 }}>
           <ambientLight intensity={1.0} />
           <Suspense fallback={null}>
@@ -312,6 +379,11 @@ function FramePlayer({ frames, videoId }: { frames: string[]; videoId: string })
 
 
 function PhotogrammetryViewer({ modelUrl }: { modelUrl: string }) {
+  // Extract job ID from the modelUrl to use the ZIP endpoint
+  const jobIdMatch = modelUrl.match(/jobs\/([^\/]+)\//);
+  const jobId = jobIdMatch ? jobIdMatch[1] : null;
+  const downloadUrl = jobId ? `http://127.0.0.1:8000/api/download-model/${jobId}` : modelUrl;
+
   return (
     <>
       <Canvas camera={{ position: [0, 1.5, 4], fov: 45 }}>
@@ -328,8 +400,8 @@ function PhotogrammetryViewer({ modelUrl }: { modelUrl: string }) {
       <div className="absolute bottom-6 left-0 right-0 text-center pointer-events-none">
         <p className="text-zinc-500 text-[11px] font-semibold tracking-wide drop-shadow-md uppercase">Drag to orbit the reconstructed 3D pose</p>
       </div>
-      <a href={modelUrl} download className="absolute top-4 right-4 bg-zinc-900/80 border border-zinc-700 backdrop-blur px-4 py-2 rounded-full text-sm font-semibold text-zinc-300 shadow-lg hover:bg-zinc-800 hover:text-white transition-colors z-10">
-        Download .obj
+      <a href={downloadUrl} download className="absolute top-4 right-4 bg-zinc-900/80 border border-zinc-700 backdrop-blur px-4 py-2 rounded-full text-sm font-semibold text-zinc-300 shadow-lg hover:bg-zinc-800 hover:text-white transition-colors z-10">
+        Download 3D Model (.zip)
       </a>
     </>
   );
@@ -356,14 +428,72 @@ function PipelineModule() {
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+// --- Video Frame Extraction Logic ---
+  const extractFramesFromVideo = async (videoFile: File, maxFrames: number = 40): Promise<{id: string, file: File, preview: string}[]> => {
+    return new Promise((resolve) => {
+      const video = document.createElement("video");
+      video.src = URL.createObjectURL(videoFile);
+      video.muted = true;
+      video.playsInline = true;
+      
+      video.addEventListener("loadedmetadata", async () => {
+        const duration = video.duration;
+        const numFrames = Math.min(maxFrames, Math.floor(duration * 2)); // 2 fps up to maxFrames
+        const interval = duration / numFrames;
+        
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        const frames: {id: string, file: File, preview: string}[] = [];
+        
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        
+        for (let i = 0; i < numFrames; i++) {
+          video.currentTime = i * interval;
+          await new Promise<void>((r) => {
+            const onSeeked = () => {
+              video.removeEventListener("seeked", onSeeked);
+              r();
+            };
+            video.addEventListener("seeked", onSeeked);
+          });
+          
+          ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, "image/jpeg", 0.95));
+          if (blob) {
+            const fileName = `frame_${i.toString().padStart(3, '0')}.jpg`;
+            const file = new File([blob], fileName, { type: "image/jpeg" });
+            frames.push({
+              id: Math.random().toString(36).substr(2, 9),
+              file,
+              preview: URL.createObjectURL(file)
+            });
+          }
+        }
+        resolve(frames);
+      });
+    });
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      const newFiles = Array.from(e.target.files).map(file => ({
-        id: Math.random().toString(36).substr(2, 9),
-        file,
-        preview: URL.createObjectURL(file)
-      }));
-      setImages(prev => [...prev, ...newFiles]);
+      setLoading(true);
+      const allNewFiles: {id: string, file: File, preview: string}[] = [];
+      
+      for (const file of Array.from(e.target.files)) {
+        if (file.type.startsWith("video/")) {
+          const videoFrames = await extractFramesFromVideo(file);
+          allNewFiles.push(...videoFrames);
+        } else if (file.type.startsWith("image/")) {
+          allNewFiles.push({
+            id: Math.random().toString(36).substr(2, 9),
+            file,
+            preview: URL.createObjectURL(file)
+          });
+        }
+      }
+      setImages(prev => [...prev, ...allNewFiles]);
+      setLoading(false);
     }
   };
 
@@ -486,10 +616,10 @@ function PipelineModule() {
         </div>
         
         <div className="bg-[#18181b] border-2 border-dashed border-zinc-700 hover:border-zinc-500 rounded-xl p-8 mb-6 transition-colors">
-          <input type="file" multiple accept="image/*" onChange={handleFileUpload} className="hidden" id="file-upload" />
+          <input type="file" multiple accept="image/*,video/mp4,video/quicktime,video/webm" onChange={handleFileUpload} className="hidden" id="file-upload" />
           <label htmlFor="file-upload" className="cursor-pointer flex flex-col items-center justify-center text-zinc-400 hover:text-zinc-200 transition-colors">
             <svg className="w-8 h-8 mb-3 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-            <span className="font-medium">Click to upload images</span>
+            <span className="font-medium">Click to upload images or video</span>
           </label>
         </div>
 
@@ -736,7 +866,7 @@ function PipelineModule() {
 }
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'pipeline' | 'practice' | 'comparison'>('pipeline');
+  const [activeTab, setActiveTab] = useState<'pipeline' | 'practice' | 'comparison' | 'coach'>('pipeline');
 
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-300 font-sans selection:bg-amber-500/30">
@@ -768,6 +898,12 @@ export default function Home() {
           >
             3. Posture Comparison
           </button>
+          <button 
+            onClick={() => setActiveTab('coach')}
+            className={`px-5 py-2 text-sm rounded-md font-medium transition-all ${activeTab === 'coach' ? 'bg-zinc-100 text-black shadow-md' : 'bg-transparent text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 border border-zinc-800'}`}
+          >
+            4. Interactive Sequence Coach
+          </button>
         </div>
 
         <div className="bg-[#121212] p-6 md:p-10 rounded-2xl border border-zinc-800/80 shadow-2xl">
@@ -779,6 +915,9 @@ export default function Home() {
           </div>
           <div className={activeTab === 'comparison' ? 'block' : 'hidden'}>
             <PostureCoach />
+          </div>
+          <div className={activeTab === 'coach' ? 'block' : 'hidden'}>
+            <FonLebCoach />
           </div>
         </div>
       </main>
