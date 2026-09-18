@@ -1,36 +1,123 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# LumThai: Fon Leb 3D Reconstruction 🇹🇭✨
 
-## Getting Started
+LumThai is an advanced, multi-modal computer vision application dedicated to the preservation, analysis, and interactive coaching of Northern Thai classical dance (*Fon Leb*). 
 
-First, run the development server:
+The platform leverages state-of-the-art AI to reconstruct photorealistic 3D volumetric avatars from standard 2D video/images, while also providing real-time biomechanical scoring and Vision Language Model (VLM) feedback to dance practitioners.
 
+---
+
+## 🌟 Key Features
+
+### 1. Volumetric Reconstruction Pipeline
+Transform a dataset of dance poses (or an uploaded MP4 video) into interactive 3D point clouds and meshes.
+* **Browser-Side Video Extraction:** Upload an `.mp4` and the frontend will instantly scrub and extract high-quality frames directly in your browser without slow server uploads.
+* **AI Processing:** The FastAPI backend isolates the dancer using `rembg`, estimates spatial relief using **DepthAnything V2**, and tracks hands using **YOLOv8**.
+* **Photogrammetry:** Uses **Apple Object Capture** to construct a highly-detailed 3D mesh (including the iconic brass nail extensions).
+* **3D Point Clouds:** View the isolated subject and cropped hand gestures as interactive 3D point clouds in the browser, powered by React Three Fiber.
+* **Asset Exporting:** Download the complete 3D model as a `.zip` (with `.obj`, `.mtl`, and `.png` textures) or export the raw depth point clouds as `.ply` files.
+
+### 2. Interactive Sequence Coach
+A private, fully local browser-based practice mirror that scores your biomechanical alignment against a curated master reference video.
+* **Intelligent Mirroring:** Flips and swaps left/right kinematic tracking data natively so your practice screen acts like a true mirror.
+* **Granular Scoring:** Independently scores your Hand/Fingers, Wrist, Arm curve, and overall Body balance.
+* **Privacy First:** Webcam frames for this module never leave your browser.
+
+### 3. Posture Comparison (Groq VLM)
+An AI-powered instructor that provides corrective, conversational feedback on your poses.
+* Analyzes a reference image alongside your practice frame using the **Qwen 3.8-27b Vision Language Model**.
+* Runs on the ultra-fast **Groq LPU Inference Engine** for near-instantaneous multimodal visual processing.
+* Returns highly actionable, plain-text feedback (e.g., *"Adjust your wrist height and bend to match the reference gesture"*).
+
+### 4. Live Practice Mirror
+A real-time webcam tracking interface visualizing your skeletal structure using **MediaPipe Holistic**. Conditionally swaps to a dedicated `Hands` model with lowered confidence thresholds to natively handle complex, overlapping finger gestures common in Thai dance.
+
+---
+
+## 🏗️ Architecture & Stack
+
+### Frontend (Next.js)
+* **Framework:** React 18 / Next.js (App Router)
+* **Styling:** Tailwind CSS (Zinc/Amber dark mode design system)
+* **3D Engine:** Three.js / React Three Fiber / Drei
+* **Tracking:** MediaPipe Holistic / Hands (Client-side)
+
+### Backend (FastAPI)
+* **Server:** Python FastAPI
+* **Computer Vision:** OpenCV, PyTorch, YOLOv8, MediaPipe (Server-side)
+* **Depth & Matting:** DepthAnything V2, `rembg` (u2net)
+* **LLM / VLM API:** Groq Python Client (Qwen-Vision)
+* **3D Generation:** Apple Object Capture (Swift)
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+* **macOS** (Required for Apple Object Capture photogrammetry features)
+* **Node.js** (v18+)
+* **Python** (v3.10+)
+
+### 1. Install Backend Dependencies
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Navigate to the backend directory
+cd backend
+
+# Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install Python requirements
+pip install -r requirements.txt
+```
+*(Note: You will also need to export your `GROQ_API_KEY` in your environment for the Posture Comparison VLM to function).*
+
+### 2. Install Frontend Dependencies
+```bash
+# From the project root directory
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 3. Run the Application
+You will need two terminal windows to run both the frontend and backend simultaneously.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+**Terminal 1 (Backend):**
+```bash
+cd backend
+source venv/bin/activate
+uvicorn main:app --reload --port 8000
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+**Terminal 2 (Frontend):**
+```bash
+npm run dev
+```
 
-## Learn More
+Open [http://localhost:3000](http://localhost:3000) in your browser to start using LumThai.
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 📂 Project Structure
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```text
+lumthai-app/
+├── backend/
+│   ├── data/              # Ephemeral pipeline output (Git ignored)
+│   ├── main.py            # FastAPI entry point & API routes
+│   ├── services.py        # CV, depth, and VLM logic
+│   └── run_photogrammetry.swift # Apple Object Capture script
+├── src/
+│   ├── app/
+│   │   ├── page.tsx       # Main dashboard & pipeline UI
+│   │   └── layout.tsx
+│   ├── components/
+│   │   ├── FonLebCoach.tsx    # Interactive sequence coach UI
+│   │   ├── PostureCoach.tsx   # Groq VLM comparison UI
+│   │   └── WebcamTracker.tsx  # MediaPipe webcam mirror
+│   └── lib/
+│       └── fonLeb/        # Algorithmic scoring logic & sequences
+```
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 📝 License
+Proprietary / Educational Use. Developed for the preservation and study of classical Northern Thai dance.
